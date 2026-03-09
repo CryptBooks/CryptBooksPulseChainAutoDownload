@@ -20,10 +20,41 @@ from collections import Counter, defaultdict
 # --- Configuration ---
 SOURCE_DIR = r"C:\SourceCode\CryptBooks\CryptBooksPortal\Data\SyncedData\transactions"
 OUTPUT_FILE = r"C:\SourceCode\CryptBooks\CryptBooksPortal\Data\transactions.js"
+WALLETS_FILE = r"C:\SourceCode\CryptBooks\CryptBooksPortal\Data\wallets.txt"
+
+def load_all_wallets():
+    """Read wallets.txt and return list of (address, name, type) tuples."""
+    wallets = []
+    if not os.path.exists(WALLETS_FILE):
+        return wallets
+    with open(WALLETS_FILE, "r") as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            parts = line.split(",")
+            addr = parts[0].strip()
+            name = parts[1].strip() if len(parts) > 1 else ""
+            wtype = parts[2].strip() if len(parts) > 2 else "unknown"
+            wallets.append((addr, name, wtype))
+    return wallets
 
 def parse_wallet_name(filename):
-    """Extract wallet name from filename like 'Chris_0xEF7a...csv'"""
+    """Extract wallet name and address from filename like 'Chris_0xEF7a...csv'
+    or 'Ext_0x006e_0x006ed788...csv'. The address is always the last 42 chars
+    (0x + 40 hex) before .csv."""
+    import re
     base = os.path.basename(filename).replace(".csv", "")
+    # Match trailing 0x + 40 hex chars as the address
+    m = re.search(r'(0x[0-9a-fA-F]{40})$', base)
+    if m:
+        address = m.group(1)
+        # Everything before the address (minus trailing underscore) is the name
+        prefix = base[:m.start()]
+        if prefix.endswith('_'):
+            prefix = prefix[:-1]
+        return prefix or address, address
+    # Fallback: old split approach
     parts = base.split("_0x", 1)
     if len(parts) == 2:
         return parts[0], "0x" + parts[1]
@@ -134,13 +165,18 @@ def main():
     all_txns = []
     wallet_names = {}
     wallet_list = []
-    csv_files = glob.glob(os.path.join(SOURCE_DIR, "*.csv"))
+    all_csv_files = glob.glob(os.path.join(SOURCE_DIR, "*.csv"))
+    # Exclude spider-discovered external wallets (Ext_ prefix) — they bloat the
+    # JS output beyond what a browser can handle.  Portal only needs named wallets.
+    csv_files = [f for f in all_csv_files
+                 if not os.path.basename(f).startswith("Ext_")]
 
     if not csv_files:
         print("ERROR: No CSV files found!")
         return
 
-    print(f"Found {len(csv_files)} CSV files")
+    skipped = len(all_csv_files) - len(csv_files)
+    print(f"Found {len(all_csv_files)} CSV files ({skipped} Ext_ skipped, {len(csv_files)} included)")
 
     for filepath in csv_files:
         name, address = parse_wallet_name(filepath)
@@ -176,6 +212,24 @@ def main():
     if not all_txns:
         print("ERROR: No transaction records found!")
         return
+
+    # Include ALL wallets from wallets.txt, even those without CSV files.
+    all_wallets = load_all_wallets()
+    existing_addrs = {w["fullAddress"] for w in wallet_list}
+    added_from_txt = 0
+    for addr, name, wtype in all_wallets:
+        lower = addr.lower()
+        if lower not in existing_addrs:
+            wallet_list.append({
+                "name": name or truncate_address(addr),
+                "address": truncate_address(addr),
+                "fullAddress": lower,
+            })
+            wallet_names[lower] = name or truncate_address(addr)
+            existing_addrs.add(lower)
+            added_from_txt += 1
+    if added_from_txt:
+        print(f"Added {added_from_txt} wallets from wallets.txt (no CSV data yet)")
 
     # Sort wallets alphabetically
     wallet_list.sort(key=lambda w: w["name"].lower())
